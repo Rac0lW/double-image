@@ -4,7 +4,7 @@ use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use image::{DynamicImage, GenericImage, ImageFormat, RgbaImage};
+use image::{DynamicImage, GenericImage, ImageFormat, ImageReader, RgbaImage};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"];
 const PACKY_API_URL: &str = "https://www.packyapi.com/v1/images/edits";
@@ -159,9 +159,23 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
     ).map_err(|e| format!("Base64 解码失败: {}", e))?;
     println!("  图片数据解码完成: {} bytes", edited_bytes.len());
 
-    let edited_img = image::load_from_memory(&edited_bytes).map_err(|e| {
-        format!("无法解析返回的图片 ({} bytes): {}", edited_bytes.len(), e)
-    })?;
+    let sig_len = edited_bytes.len().min(16);
+    println!("  文件签名 (hex): {}",
+        edited_bytes[..sig_len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+
+    let mut reader = ImageReader::new(Cursor::new(&edited_bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("无法识别图片格式: {}", e))?;
+    println!("  检测到的格式: {:?}", reader.format());
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(4 * 1024 * 1024 * 1024); // 4GB
+    reader.limits(limits);
+
+    let edited_img = reader.decode()
+        .map_err(|e| format!("解码图片失败 ({} bytes): {}", edited_bytes.len(), e))?;
 
     let mut output_img = RgbaImage::new(width * 2, height);
     output_img.copy_from(&img.to_rgba8(), 0, 0)?;
