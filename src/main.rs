@@ -168,11 +168,7 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
         .map_err(|e| format!("无法识别图片格式: {}", e))?;
     println!("  检测到的格式: {:?}", reader.format());
 
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16384);
-    limits.max_image_height = Some(16384);
-    limits.max_alloc = Some(4 * 1024 * 1024 * 1024); // 4GB
-    reader.limits(limits);
+    reader.no_limits();
 
     let edited_img = reader.decode()
         .map_err(|e| format!("解码图片失败 ({} bytes): {}", edited_bytes.len(), e))?;
