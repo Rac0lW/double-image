@@ -4,7 +4,7 @@ use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use image::{DynamicImage, GenericImage, ImageFormat, ImageReader, RgbaImage};
+use image::{DynamicImage, GenericImage, ImageFormat, RgbaImage};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"];
 const PACKY_API_URL: &str = "https://www.packyapi.com/v1/images/edits";
@@ -163,15 +163,17 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
     println!("  文件签名 (hex): {}",
         edited_bytes[..sig_len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
 
-    let mut reader = ImageReader::new(Cursor::new(&edited_bytes))
-        .with_guessed_format()
-        .map_err(|e| format!("无法识别图片格式: {}", e))?;
-    println!("  检测到的格式: {:?}", reader.format());
-
-    reader.no_limits();
-
-    let edited_img = reader.decode()
-        .map_err(|e| format!("解码图片失败 ({} bytes): {}", edited_bytes.len(), e))?;
+    let edited_img = image::load_from_memory_with_format(&edited_bytes, ImageFormat::Png)
+        .or_else(|e| {
+            println!("  内存直接解码失败 ({}), 尝试写入临时文件...", e);
+            let tmp = std::env::temp_dir().join("double_image_ic_tmp.png");
+            std::fs::write(&tmp, &edited_bytes)
+                .map_err(|ioe| format!("写入临时文件失败: {}", ioe))?;
+            let img = image::open(&tmp)
+                .map_err(|e| format!("从临时文件解码失败: {}", e))?;
+            let _ = std::fs::remove_file(&tmp);
+            Ok::<DynamicImage, Box<dyn std::error::Error>>(img)
+        })?;
 
     let mut output_img = RgbaImage::new(width * 2, height);
     output_img.copy_from(&img.to_rgba8(), 0, 0)?;
