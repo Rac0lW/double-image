@@ -117,7 +117,7 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
         .text("prompt", prompt)
         .text("size", "auto")
         .text("quality", "high")
-        .text("response_format", "url")
+        .text("response_format", "b64_json")
         .text("output_format", "png")
         .text("input_fidelity", "high")
         .part(
@@ -142,62 +142,25 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
     }
 
     let json: serde_json::Value = response.json()?;
-    let url = json["data"][0]["url"]
-        .as_str()
-        .ok_or("API 返回格式错误：缺少 url 字段")?;
 
     let revised = json["data"][0]["revised_prompt"].as_str().unwrap_or("");
     if !revised.is_empty() {
         println!("  模型优化后的提示词: {}", revised);
     }
 
-    println!("  正在下载处理后的图片...");
-    let download_resp = client
-        .get(url)
-        .timeout(Duration::from_secs(60))
-        .send()
-        .map_err(|e| format!("下载图片请求失败: {}", format_error_chain(&e)))?;
+    println!("  正在解析 API 返回的图片数据...");
+    let b64 = json["data"][0]["b64_json"]
+        .as_str()
+        .ok_or("API 返回格式错误：缺少 b64_json 字段")?;
 
-    let status = download_resp.status();
-    let content_type = download_resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("未知")
-        .to_string();
-    println!("  下载响应: HTTP {} / Content-Type: {}", status, content_type);
-
-    let edited_bytes = download_resp.bytes().map_err(|e| {
-        format!("读取下载内容失败: {}", format_error_chain(&e))
-    })?;
-    println!("  下载完成: {} bytes", edited_bytes.len());
-
-    if !status.is_success() {
-        let preview = String::from_utf8_lossy(&edited_bytes[..edited_bytes.len().min(500)]);
-        return Err(format!(
-            "下载图片失败 (HTTP {})，响应内容预览:\n{}",
-            status, preview
-        ).into());
-    }
-
-    if !content_type.starts_with("image/") {
-        let preview = String::from_utf8_lossy(&edited_bytes[..edited_bytes.len().min(500)]);
-        let hex_preview: String = edited_bytes[..edited_bytes.len().min(32)]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        return Err(format!(
-            "下载的内容不是图片格式 (Content-Type: {})。\n前 32 bytes (hex): {}\n内容预览:\n{}",
-            content_type, hex_preview, preview
-        ).into());
-    }
+    let edited_bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        b64,
+    ).map_err(|e| format!("Base64 解码失败: {}", e))?;
+    println!("  图片数据解码完成: {} bytes", edited_bytes.len());
 
     let edited_img = image::load_from_memory(&edited_bytes).map_err(|e| {
-        format!(
-            "无法解析下载的图片 ({} bytes, Content-Type: {}): {}",
-            edited_bytes.len(), content_type, e
-        )
+        format!("无法解析返回的图片 ({} bytes): {}", edited_bytes.len(), e)
     })?;
 
     let mut output_img = RgbaImage::new(width * 2, height);

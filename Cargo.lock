@@ -261,6 +261,7 @@ dependencies = [
 name = "double-image"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "image",
  "reqwest",
  "serde_json",
