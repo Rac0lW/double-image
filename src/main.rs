@@ -163,6 +163,12 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
     println!("  文件签名 (hex): {}",
         edited_bytes[..sig_len].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
 
+    if edited_bytes.len() > 16 {
+        let w = u32::from_be_bytes([edited_bytes[16], edited_bytes[17], edited_bytes[18], edited_bytes[19]]);
+        let h = u32::from_be_bytes([edited_bytes[20], edited_bytes[21], edited_bytes[22], edited_bytes[23]]);
+        println!("  PNG IHDR 尺寸: {}x{}", w, h);
+    }
+
     let edited_img = image::load_from_memory_with_format(&edited_bytes, ImageFormat::Png)
         .or_else(|e| {
             println!("  内存直接解码失败 ({}), 尝试写入临时文件...", e);
