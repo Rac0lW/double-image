@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use image::{DynamicImage, GenericImage, ImageFormat, RgbaImage};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"];
+const PACKY_API_URL: &str = "https://www.packyapi.com/v1/images/edits";
 
 fn is_image_file(path: &Path) -> bool {
     path.extension()
@@ -31,9 +33,7 @@ fn ask_user_confirmation(count: usize) -> bool {
     io::stdout().flush().unwrap();
 
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .expect("读取输入失败");
+    io::stdin().read_line(&mut input).expect("读取输入失败");
 
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
@@ -43,10 +43,7 @@ fn double_image_horizontal(input_path: &Path) -> Result<PathBuf, Box<dyn std::er
     let (width, height) = (img.width(), img.height());
 
     let mut output_img = RgbaImage::new(width * 2, height);
-
-    // 左边放原图
     output_img.copy_from(&img.to_rgba8(), 0, 0)?;
-    // 右边放原图
     output_img.copy_from(&img.to_rgba8(), width, 0)?;
 
     let stem = input_path
@@ -77,20 +74,145 @@ fn double_image_horizontal(input_path: &Path) -> Result<PathBuf, Box<dyn std::er
     Ok(output_path)
 }
 
+fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let api_key = env::var("PACKY_API_KEY")
+        .map_err(|_| "请设置环境变量 PACKY_API_KEY（Sora 分组令牌）")?;
+
+    let img = image::open(input_path)?;
+    let (width, height) = (img.width(), img.height());
+
+    println!("  正在调用 PackyAPI GPT-Image-2 进行结构挖孔，请耐心等待...");
+
+    let mut img_bytes: Vec<u8> = Vec::new();
+    img.write_to(&mut Cursor::new(&mut img_bytes), ImageFormat::Png)?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()?;
+
+    let prompt = concat!(
+        "分析图片中的人物形象，在其关键解剖结构点和结构 landmark 处",
+        "（如关节、面部特征、肌肉附着点、身体比例关键点、肢体转折点等）",
+        "挖出圆形孔洞，露出干净的浅灰色背景。",
+        "孔洞大小各异（直径约为画面中人物高度的 3% 到 12%），",
+        "分布应覆盖全身多个关键结构位置但不过于密集，",
+        "其余部分保持完全完整。用于人体结构绘画练习。"
+    );
+
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("model", "gpt-image-2")
+        .text("prompt", prompt)
+        .text("size", "auto")
+        .text("quality", "high")
+        .text("response_format", "url")
+        .text("output_format", "png")
+        .text("input_fidelity", "high")
+        .part(
+            "image",
+            reqwest::blocking::multipart::Part::bytes(img_bytes)
+                .file_name("input.png")
+                .mime_str("image/png")?,
+        );
+
+    let response = client
+        .post(PACKY_API_URL)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .multipart(form)
+        .send()?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().unwrap_or_default();
+        return Err(format!("API 请求失败: {} - {}", status, text).into());
+    }
+
+    let json: serde_json::Value = response.json()?;
+    let url = json["data"][0]["url"]
+        .as_str()
+        .ok_or("API 返回格式错误：缺少 url 字段")?;
+
+    let revised = json["data"][0]["revised_prompt"].as_str().unwrap_or("");
+    if !revised.is_empty() {
+        println!("  模型优化后的提示词: {}", revised);
+    }
+
+    println!("  正在下载处理后的图片...");
+    let edited_bytes = client
+        .get(url)
+        .timeout(Duration::from_secs(60))
+        .send()?
+        .bytes()?;
+
+    let edited_img = image::load_from_memory(&edited_bytes)?;
+
+    let mut output_img = RgbaImage::new(width * 2, height);
+    output_img.copy_from(&img.to_rgba8(), 0, 0)?;
+    output_img.copy_from(&edited_img.to_rgba8(), width, 0)?;
+
+    let stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let ext = input_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png");
+
+    let output_name = format!("{}_ic.{}", stem, ext);
+    let output_path = input_path.with_file_name(&output_name);
+
+    let format = ImageFormat::from_path(input_path).unwrap_or(ImageFormat::Png);
+    DynamicImage::ImageRgba8(output_img).save_with_format(&output_path, format)?;
+
+    println!(
+        "✓ {} → {} ({}x{} → {}x{}, image-cutout 模式)",
+        input_path.display(),
+        output_path.display(),
+        width,
+        height,
+        width * 2,
+        height
+    );
+
+    Ok(output_path)
+}
+
+fn print_usage() {
+    println!("用法:");
+    println!("  double-image [选项] <图片文件> [更多图片文件...]");
+    println!();
+    println!("选项:");
+    println!("  --ic    启用 image-cutout 模式：右边图片进行结构挖孔，左边保留原图作对比参考");
+    println!();
+    println!("环境变量:");
+    println!("  PACKY_API_KEY    image-cutout 模式必需的 API 令牌（Sora 分组）");
+    println!();
+    println!("示例:");
+    println!("  double-image photo.png                  # 默认 double 模式");
+    println!("  double-image --ic photo.png             # image-cutout 模式");
+    println!("  double-image --ic img1.jpg img2.png     # 批量 IC 处理");
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let input_paths: Vec<PathBuf> = if args.len() > 1 {
-        // 指定了输入文件
-        args[1..].iter().map(PathBuf::from).collect()
+    if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
+        print_usage();
+        return;
+    }
+
+    let ic_mode = args.iter().any(|a| a == "--ic");
+    let filtered_args: Vec<String> = args.into_iter().filter(|a| a != "--ic").collect();
+
+    let input_paths: Vec<PathBuf> = if filtered_args.len() > 1 {
+        filtered_args[1..].iter().map(PathBuf::from).collect()
     } else {
-        // 没有指定，扫描当前目录
         let current_dir = env::current_dir().expect("无法获取当前目录");
         let image_files = get_image_files_in_dir(&current_dir);
 
         if image_files.is_empty() {
             println!("当前目录没有找到图片文件。");
-            println!("用法: double-image <图片文件> [更多图片文件...]");
+            print_usage();
             return;
         }
 
@@ -101,6 +223,15 @@ fn main() {
 
         image_files
     };
+
+    if ic_mode {
+        if env::var("PACKY_API_KEY").is_err() {
+            eprintln!("错误: image-cutout 模式需要设置 PACKY_API_KEY 环境变量");
+            eprintln!("      export PACKY_API_KEY=\"你的 Sora 分组令牌\"");
+            return;
+        }
+        println!("已启用 image-cutout 模式，将调用 PackyAPI GPT-Image-2 进行结构挖孔...\n");
+    }
 
     let mut success_count = 0;
     let mut fail_count = 0;
@@ -118,7 +249,13 @@ fn main() {
             continue;
         }
 
-        match double_image_horizontal(path) {
+        let result = if ic_mode {
+            process_image_cutout(path)
+        } else {
+            double_image_horizontal(path)
+        };
+
+        match result {
             Ok(_) => success_count += 1,
             Err(e) => {
                 eprintln!("✗ 处理失败 {}: {}", path.display(), e);
