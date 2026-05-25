@@ -74,6 +74,16 @@ fn double_image_horizontal(input_path: &Path) -> Result<PathBuf, Box<dyn std::er
     Ok(output_path)
 }
 
+fn format_error_chain(e: &dyn std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+        msg.push_str(&format!("\n  → {}", s));
+        source = s.source();
+    }
+    msg
+}
+
 fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let api_key = env::var("PACKY_API_KEY")
         .map_err(|_| "请设置环境变量 PACKY_API_KEY（Sora 分组令牌）")?;
@@ -85,10 +95,13 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
 
     let mut img_bytes: Vec<u8> = Vec::new();
     img.write_to(&mut Cursor::new(&mut img_bytes), ImageFormat::Png)?;
+    println!("  图片已编码为 PNG，大小: {} bytes", img_bytes.len());
 
+    println!("  构建 HTTP 客户端...");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
-        .build()?;
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", format_error_chain(&e)))?;
 
     let prompt = concat!(
         "分析图片中的人物形象，在其关键解剖结构点和结构 landmark 处",
@@ -114,11 +127,13 @@ fn process_image_cutout(input_path: &Path) -> Result<PathBuf, Box<dyn std::error
                 .mime_str("image/png")?,
         );
 
+    println!("  发送请求到 {} ...", PACKY_API_URL);
     let response = client
         .post(PACKY_API_URL)
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
-        .send()?;
+        .send()
+        .map_err(|e| format!("发送请求失败: {}", format_error_chain(&e)))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -231,6 +246,16 @@ fn main() {
             return;
         }
         println!("已启用 image-cutout 模式，将调用 PackyAPI GPT-Image-2 进行结构挖孔...\n");
+
+        if let Ok(proxy) = env::var("HTTPS_PROXY").or_else(|_| env::var("https_proxy")) {
+            println!("[诊断] 检测到 HTTPS_PROXY: {}", proxy);
+        }
+        if let Ok(proxy) = env::var("HTTP_PROXY").or_else(|_| env::var("http_proxy")) {
+            println!("[诊断] 检测到 HTTP_PROXY: {}", proxy);
+        }
+        if let Ok(no_proxy) = env::var("NO_PROXY").or_else(|_| env::var("no_proxy")) {
+            println!("[诊断] 检测到 NO_PROXY: {}", no_proxy);
+        }
     }
 
     let mut success_count = 0;
@@ -258,7 +283,7 @@ fn main() {
         match result {
             Ok(_) => success_count += 1,
             Err(e) => {
-                eprintln!("✗ 处理失败 {}: {}", path.display(), e);
+                eprintln!("✗ 处理失败 {}:\n{}", path.display(), format_error_chain(&*e));
                 fail_count += 1;
             }
         }
